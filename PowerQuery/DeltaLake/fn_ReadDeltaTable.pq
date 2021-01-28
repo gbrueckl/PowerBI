@@ -1,9 +1,11 @@
 (
     DeltaTableFolderContent as table,
-    optional DeltaTableVersion as number
+    optional DeltaTableOptions as record
 ) as table =>
 
 let
+
+    DeltaTableVersion = if DeltaTableOptions = null or not Record.HasFields(DeltaTableOptions, "Version") then null else Record.Field(DeltaTableOptions, "Version"),
 
     #"Delimiter" = 
     let
@@ -39,9 +41,9 @@ let
         #"Filtered Rows Version" = Table.SelectRows(#"_delta_log", each Text.EndsWith([Name], ".checkpoint.parquet")),
         MaxVersion = try Table.Group(#"Filtered Rows Version", {}, {{"MaxVersion", each List.Max([Version]), type number}}){0}[MaxVersion] otherwise -1,
         #"Filtered Rows MaxVersion" = Table.SelectRows(#"Filtered Rows Version", each [Version] = MaxVersion),
-        CheckpointFromVersion = [version=MaxVersion, size=-1, parts = Table.RowCount(#"Filtered Rows MaxVersion")],
+        CheckpointFromVersion = [version=try MaxVersion otherwise -1, size=-1, parts = Table.RowCount(#"Filtered Rows MaxVersion")],
 
-        LastCheckpoint =  if DeltaTableVersion = null then LatestCheckPointWithParts else CheckpointFromVersion
+        LastCheckpoint = Table.Buffer(Table.FromRecords({if DeltaTableVersion = null then LatestCheckPointWithParts else CheckpointFromVersion})){0}
     in
         LastCheckpoint,
 
@@ -96,7 +98,7 @@ let
     in
         buffered,
 
-        #"metadata_columns" = 
+    #"metadata_columns" = 
     let
         Source = #"Logs ALL",
         #"Filtered Rows1" = Table.SelectRows(Source, each ([metaData] <> null)),
@@ -110,7 +112,8 @@ let
         #"Expanded schemaString" = Table.ExpandRecordColumn(JSON, "schemaString", {"fields"}, {"fields"}),
         #"Expanded fields" = Table.ExpandListColumn(#"Expanded schemaString", "fields"),
         #"Expanded fields1" = Table.ExpandRecordColumn(#"Expanded fields", "fields", {"name", "type", "nullable", "metadata"}, {"name", "type", "nullable", "metadata"}),
-        #"Added Custom1" = Table.AddColumn(#"Expanded fields1", "PBI_DataType", each if [type] = "long" then Int64.Type
+        #"Buffered Fields" = Table.Buffer(#"Expanded fields1"),
+        #"Added Custom1" = Table.AddColumn(#"Buffered Fields", "PBI_DataType", each if [type] = "long" then Int64.Type
     else if [type] = "integer" then Int32.Type
     else if [type] = "short" then Int16.Type
     else if [type] = "byte" then Int8.Type
@@ -132,10 +135,11 @@ let
         #"Added full_path" = Table.AddColumn(#"Relevant Files", "full_path", each DeltaTablePath & Text.Replace([file_name_delta], "=", "%3D"), Text.Type),
         #"Split Column by Delimiter" = Table.SplitColumn(#"Added full_path", "full_path", Splitter.SplitTextByEachDelimiter({Delimiter}, QuoteStyle.Csv, true), {"FolderPath", "Name"}),
         #"Added Custom" = Table.AddColumn(#"Split Column by Delimiter", "Folder Path", each [FolderPath] & Delimiter, Text.Type),
-        #"Removed Other Columns" = Table.Buffer(Table.SelectColumns(#"Added Custom",{"Folder Path", "Name"})),
-        #"Merged Queries" = Table.NestedJoin(#"Removed Other Columns", {"Folder Path", "Name"}, DeltaTableFolderContent, {"Folder Path", "Name"}, "DeltaTable Folder", JoinKind.Inner),
+        #"Removed Other Columns" = Table.SelectColumns(#"Added Custom",{"Folder Path", "Name"}),
+        #"Buffered RelevantFiles" = Table.Buffer(#"Removed Other Columns"),
+        #"Merged Queries" = Table.NestedJoin(#"Buffered RelevantFiles", {"Folder Path", "Name"}, DeltaTableFolderContent, {"Folder Path", "Name"}, "DeltaTable Folder", JoinKind.Inner),
         #"Removed Other Columns1" = Table.SelectColumns(#"Merged Queries",{"DeltaTable Folder"}),
-        #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Other Columns1", "DeltaTable Folder", {"Content", "Name", "Extension", "Date accessed", "Date modified", "Date created", "Attributes", "Folder Path"}, {"Content", "Name", "Extension", "Date accessed", "Date modified", "Date created", "Attributes", "Folder Path"}),
+        #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Other Columns1", "DeltaTable Folder", {"Content", "Folder Path"}, {"Content", "Folder Path"}),
         #"Added Custom1" = Table.AddColumn(#"Expanded DeltaTable Folder", "Data", each Parquet.Document([Content]), Table.Type),
         #"Removed Other Columns2" = Table.SelectColumns(#"Added Custom1",{"Data"}),
         #"Expanded Data" = Table.ExpandTableColumn(#"Removed Other Columns2", "Data", metadata_columns[name]),
