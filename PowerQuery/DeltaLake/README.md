@@ -7,7 +7,26 @@ The provided PowerQuery/M function allows you to read a Delta Lake table directl
     - Azure Data Lake Store
     - Azure Blob Storage
     - Local Folder or Network Share
-- Support for Delta Lake time travel - reading `VERSION AS OF`
+- Support for Delta Lake time travel - e.g. `VERSION AS OF`
+
+# Usage
+1. In PowerBI desktop, go to Home -> Queries -> Transform Data
+2. Once you are in the Power Query Editor use Home -> New Source -> Blank query
+3. Go to Home -> Query -> Advanced Editor
+4. Paste the code of the custom function: [fn_ReadDeltaTable.pq](https://raw.githubusercontent.com/gbrueckl/PowerBI/main/PowerQuery/DeltaLake/fn_ReadDeltaTable.pq)
+5. Connect to your storage - e.g. create a PQ query with the following code and call it `ADLS_Content`
+```
+let
+    Source = AzureStorage.DataLake(
+        "https://myadls.dfs.core.windows.net/data/MyDeltaTable.delta",
+        [HierarchicalNavigation = false]
+in
+    Source
+```
+6. Open your function and select `ADLS_Cotent` in the parameter `DeltaTableFolderContent`
+7. A new PQ query will be created for you showing the contents of the Delta Lake Table
+
+
 
 # Known limitations
 - Reading from Blob Store
@@ -25,10 +44,14 @@ The provided PowerQuery/M function allows you to read a Delta Lake table directl
 
 
 # FAQ
+**Q:** Which path do I need to specify?
 
-Q: How can I read my Delta Lake table stored on Azure Blob Storage?
+**A:** You need to specify the path to the folder where the Delta Lake table is stored. It must contain a sub-folder `_delta_log`.
 
-A: Here is some sample code which returns the expected folder structure form a Blob Storage:
+--------------------
+**Q:** How can I read my Delta Lake table stored on Azure Blob Storage?
+
+**A:** Here is some sample code which returns the expected folder structure form a Blob Storage:
 ```
 let
     Source = AzureStorage.Blobs("https://myaccount.blob.core.windows.net/mycontainer"),
@@ -40,4 +63,4 @@ let
 in
     #"Append Delimiter"
 ```
-The output can be fed into the function then.
+The output can then be fed into the function.
