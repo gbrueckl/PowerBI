@@ -106,13 +106,14 @@ let
         #"Filtered Rows2" = Table.SelectRows(#"Filtered Rows1", each [Version] = MaxVersion),
         #"Kept First Rows" = Table.FirstN(#"Filtered Rows2",1),
         #"Removed Other Columns" = Table.SelectColumns(#"Kept First Rows",{"metaData"}),
-        #"Expanded metaData" = Table.ExpandRecordColumn(#"Removed Other Columns", "metaData", {"schemaString"}, {"schemaString"}),
+        #"Expanded metaData" = Table.ExpandRecordColumn(#"Removed Other Columns", "metaData", {"schemaString", "partitionColumns"}, {"schemaString", "partitionColumns"}),
         #"Filtered Rows" = Table.SelectRows(#"Expanded metaData", each ([schemaString] <> null)),
         JSON = Table.TransformColumns(#"Filtered Rows",{{"schemaString", Json.Document}}),
         #"Expanded schemaString" = Table.ExpandRecordColumn(JSON, "schemaString", {"fields"}, {"fields"}),
         #"Expanded fields" = Table.ExpandListColumn(#"Expanded schemaString", "fields"),
         #"Expanded fields1" = Table.ExpandRecordColumn(#"Expanded fields", "fields", {"name", "type", "nullable", "metadata"}, {"name", "type", "nullable", "metadata"}),
-        #"Buffered Fields" = Table.Buffer(#"Expanded fields1"),
+        #"Added Custom" = Table.AddColumn(#"Expanded fields1", "isPartitionedBy", each List.Contains([partitionColumns], [name]), Logical.Type),
+        #"Buffered Fields" = Table.Buffer(#"Added Custom"),
         #"Added Custom1" = Table.AddColumn(#"Buffered Fields", "PBI_DataType", each if [type] = "long" then Int64.Type
     else if [type] = "integer" then Int32.Type
     else if [type] = "short" then Int16.Type
@@ -136,13 +137,18 @@ let
         #"Split Column by Delimiter" = Table.SplitColumn(#"Added full_path", "full_path", Splitter.SplitTextByEachDelimiter({Delimiter}, QuoteStyle.Csv, true), {"FolderPath", "Name"}),
         #"Added Custom" = Table.AddColumn(#"Split Column by Delimiter", "Folder Path", each [FolderPath] & Delimiter, Text.Type),
         #"Removed Other Columns" = Table.SelectColumns(#"Added Custom",{"Folder Path", "Name"}),
-        #"Buffered RelevantFiles" = Table.Buffer(#"Removed Other Columns"),
+        #"Split PartitionFolders" = Table.AddColumn(#"Removed Other Columns", "PartitionFolders", each Text.Trim(Text.Replace([Folder Path], DeltaTablePath, ""), Delimiter), Text.Type),
+        #"Split PartitionColumns" = Table.AddColumn(#"Split PartitionFolders", "PartitionList", each Text.Split([PartitionFolders], Delimiter)),
+        #"Get PartitionValues" = Table.TransformColumns(#"Split PartitionColumns", {"PartitionList", (x) => Table.FromRecords(List.Transform(x, (y) => Record.FromList(Text.Split(y, "%3D"), {"Column", "Value"})))}),
+        #"Pivot PartitionValues" = Table.AddColumn(#"Get PartitionValues", "PartitionValues", each Table.Pivot([PartitionList], List.Distinct([PartitionList][Column]), "Column", "Value", List.Max)),
+        #"Expanded PartitionValues" = Table.ExpandTableColumn(#"Pivot PartitionValues", "PartitionValues", Table.SelectRows(metadata_columns, each [isPartitionedBy])[name]),
+        #"Buffered RelevantFiles" = Table.Buffer(#"Expanded PartitionValues"),
         #"Merged Queries" = Table.NestedJoin(#"Buffered RelevantFiles", {"Folder Path", "Name"}, DeltaTableFolderContent, {"Folder Path", "Name"}, "DeltaTable Folder", JoinKind.Inner),
-        #"Removed Other Columns1" = Table.SelectColumns(#"Merged Queries",{"DeltaTable Folder"}),
-        #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Other Columns1", "DeltaTable Folder", {"Content", "Folder Path"}, {"Content", "Folder Path"}),
+        #"Removed Columns" = Table.RemoveColumns(#"Merged Queries",{"Folder Path", "Name", "PartitionFolders", "PartitionList"}),
+        #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Columns", "DeltaTable Folder", {"Content", "Folder Path"}, {"Content", "Folder Path"}),
         #"Added Custom1" = Table.AddColumn(#"Expanded DeltaTable Folder", "Data", each Parquet.Document([Content]), Table.Type),
-        #"Removed Other Columns2" = Table.SelectColumns(#"Added Custom1",{"Data"}),
-        #"Expanded Data" = Table.ExpandTableColumn(#"Removed Other Columns2", "Data", metadata_columns[name]),
+        #"Removed Columns1" = Table.RemoveColumns(#"Added Custom1",{"Content", "Folder Path"}),
+        #"Expanded Data" = Table.ExpandTableColumn(#"Removed Columns1", "Data", Table.SelectRows(metadata_columns, each not [isPartitionedBy])[name]),
         #"Changed Type" = Table.TransformColumnTypes(#"Expanded Data",metadata_columns[ChangeDataType])
     in
         #"Changed Type"
