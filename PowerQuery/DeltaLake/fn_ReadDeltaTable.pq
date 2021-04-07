@@ -6,17 +6,23 @@
 let
 
     DeltaTableVersion = if DeltaTableOptions = null or not Record.HasFields(DeltaTableOptions, "Version") then null else Record.Field(DeltaTableOptions, "Version"),
-
+    DeltaTableFolderContent_wFullPath = 
+    let 
+        #"Added Full_Path" = Table.AddColumn(DeltaTableFolderContent, "Full_Path", each Text.Replace([Folder Path] & [Name], "=", "%3D")),
+        Buffered = Table.Buffer(#"Added Full_Path")
+    in
+        Buffered,
+        
     #"Delimiter" = 
     let
-        DeltaTablePath = Text.End(DeltaTableFolderContent{0}[Folder Path], 1)
+        Delimiter = if Text.Contains(DeltaTableFolderContent_wFullPath{0}[Full_Path], "//") then "/" else "\"
     in
-        DeltaTablePath,
+        Delimiter,
 
     #"_delta_log Folder" = 
     let
-       Source = DeltaTableFolderContent,
-       #"Filtered Rows" = Table.SelectRows(Source, each Text.EndsWith([Folder Path], Delimiter & "_delta_log" & Delimiter)),
+       Source = DeltaTableFolderContent_wFullPath,
+       #"Filtered Rows" = Table.SelectRows(Source, each Text.Contains([Full_Path], Delimiter & "_delta_log" & Delimiter)),
        #"Added Version" = Table.AddColumn(#"Filtered Rows", "Version", each try Int64.From(Text.BeforeDelimiter([Name], ".")) otherwise -1, Int64.Type),
        #"Filtered RequestedVersion" = if DeltaTableVersion = null then #"Added Version" else Table.SelectRows(#"Added Version", each [Version] <= DeltaTableVersion),
        buffered = Table.Buffer(#"Filtered RequestedVersion")
@@ -25,16 +31,16 @@ let
 
     #"DeltaTablePath" = 
     let
-        DeltaTablePath = Text.Replace(#"_delta_log Folder"{0}[Folder Path], "_delta_log" & Delimiter, "")
+        DeltaTablePath = Text.Combine(List.RemoveLastN(Text.Split(#"_delta_log Folder"{0}[Full_Path], Delimiter), 2), Delimiter) & Delimiter
     in
         DeltaTablePath,
 
     #"_last_checkpoint" = 
     let
         #"_delta_log" = #"_delta_log Folder",
-        #"Filtered Rows" = Table.SelectRows(_delta_log, each [Name] = "_last_checkpoint"),
+        #"Filtered Rows" = Table.SelectRows(_delta_log, each Text.EndsWith([Name], "_last_checkpoint")),
         #"Added Custom" = Table.AddColumn(#"Filtered Rows", "JsonContent", each Json.Document([Content])),
-        JsonContent = #"Added Custom"{[#"Folder Path"=DeltaTablePath & "_delta_log" & Delimiter,Name="_last_checkpoint"]}[JsonContent],
+        JsonContent = #"Added Custom"{0}[JsonContent],
         CheckEmpty = if Table.RowCount(#"Filtered Rows") = 0 then [Size=-1, version=-1] else JsonContent,
         LatestCheckPointWithParts = if Record.HasFields(CheckEmpty, "parts") then CheckEmpty else Record.AddField(CheckEmpty, "parts", 1),
 
@@ -55,7 +61,8 @@ let
         #"Add SingleFile" = Table.AddColumn(#"Add Version", "file_name", each Text.PadStart(Text.From([version]), 20, "0") & ".checkpoint.parquet", Text.Type),
         #"Add MultipleFiles" = Table.AddColumn(#"Add Version", "file_name", each Text.PadStart(Text.From([version]), 20, "0") & ".checkpoint." & Text.PadStart(Text.From([part]), 10, "0") & "." & Text.PadStart(Text.From(Record.Field(_last_checkpoint, "parts")), 10, "0") & ".parquet", Text.Type),
         AllFiles = Table.SelectColumns(if Record.Field(_last_checkpoint, "parts") = 1 then #"Add SingleFile" else #"Add MultipleFiles", "file_name"),
-        Content = Table.SelectRows(#"_delta_log Folder", each List.Contains(Table.ToList(AllFiles), [Name]))
+        AllFiles_BufferedList = List.Buffer(Table.ToList(AllFiles)),
+        Content = Table.SelectRows(#"_delta_log Folder", each List.Count(List.Select(AllFiles_BufferedList, (inner) => Text.EndsWith([Name], inner))) > 0)
     in
         Content,
 
@@ -90,13 +97,13 @@ let
     #"Logs ALL" = 
     let
         Source = Table.Combine({#"Logs Checkpoint", #"Logs JSON"}),
-        #"Added Counter" = Table.AddColumn(Source, "Counter", each if [remove] <> null then -1 else if [add] <> null then 1 else null, Int8.Type),
-        #"Expanded remove" = Table.ExpandRecordColumn(#"Added Counter", "remove", {"path"}, {"remove.path"}),
-        #"Expanded add" = Table.ExpandRecordColumn(#"Expanded remove", "add", {"path"}, {"add.path"}),
-        #"Added Custom1" = Table.AddColumn(#"Expanded add", "file_name_delta", each if [Counter] = -1 then [remove.path] else [add.path], Text.Type),
-        buffered = Table.Buffer(#"Added Custom1")
+        #"Added timestamp" = Table.AddColumn(Source, "log_timestamp", each if [add] <> null then Record.Field([add], "modificationTime") else 
+    if [remove] <> null then Record.Field([remove], "deletionTimestamp") else 
+    if [commitInfo] <> null then Record.Field([commitInfo], "timestamp") else 
+    if [metaData] <> null then Record.Field([metaData], "createdTime") else null, Int64.Type),
+        #"Added datetime" = Table.AddColumn(#"Added timestamp", "log_datetime", each try #datetime(1970,1,1,0,0,0)+#duration(0,0,0,[log_timestamp]/1000) otherwise null, DateTime.Type)
     in
-        buffered,
+        #"Added datetime",
 
     #"metadata_columns" = 
     let
@@ -131,23 +138,24 @@ let
     #"Data" = 
     let
         Source = #"Logs ALL",
-        #"Grouped Rows" = Table.Group(Source, {"file_name_delta"}, {{"isRelevant", each List.Sum([Counter]), Int8.Type}}),
-        #"Relevant Files" = Table.SelectRows(#"Grouped Rows", each ([isRelevant] > 0)),
-        #"Added full_path" = Table.AddColumn(#"Relevant Files", "full_path", each DeltaTablePath & Text.Replace([file_name_delta], "=", "%3D"), Text.Type),
-        #"Split Column by Delimiter" = Table.SplitColumn(#"Added full_path", "full_path", Splitter.SplitTextByEachDelimiter({Delimiter}, QuoteStyle.Csv, true), {"FolderPath", "Name"}),
-        #"Added Custom" = Table.AddColumn(#"Split Column by Delimiter", "Folder Path", each [FolderPath] & Delimiter, Text.Type),
-        #"Removed Other Columns" = Table.SelectColumns(#"Added Custom",{"Folder Path", "Name"}),
-        #"Split PartitionFolders" = Table.AddColumn(#"Removed Other Columns", "PartitionFolders", each Text.Trim(Text.Replace([Folder Path], DeltaTablePath, ""), Delimiter), Text.Type),
-        #"Split PartitionColumns" = Table.AddColumn(#"Split PartitionFolders", "PartitionList", each Text.Split([PartitionFolders], Delimiter)),
-        #"Get PartitionValues" = Table.TransformColumns(#"Split PartitionColumns", {"PartitionList", (x) => Table.FromRecords(List.Transform(x, (y) => Record.FromList(Text.Split(y, "%3D"), {"Column", "Value"})))}),
-        #"Pivot PartitionValues" = Table.AddColumn(#"Get PartitionValues", "PartitionValues", each Table.Pivot([PartitionList], List.Distinct([PartitionList][Column]), "Column", "Value", List.Max)),
-        #"Expanded PartitionValues" = Table.ExpandTableColumn(#"Pivot PartitionValues", "PartitionValues", Table.SelectRows(metadata_columns, each [isPartitionedBy])[name]),
-        #"Buffered RelevantFiles" = Table.Buffer(#"Expanded PartitionValues"),
-        #"Merged Queries" = Table.NestedJoin(#"Buffered RelevantFiles", {"Folder Path", "Name"}, DeltaTableFolderContent, {"Folder Path", "Name"}, "DeltaTable Folder", JoinKind.Inner),
-        #"Removed Columns" = Table.RemoveColumns(#"Merged Queries",{"Folder Path", "Name", "PartitionFolders", "PartitionList"}),
-        #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Columns", "DeltaTable Folder", {"Content", "Folder Path"}, {"Content", "Folder Path"}),
+        #"Added Counter" = Table.AddColumn(Source, "Counter", each if [remove] <> null then -1 else if [add] <> null then 1 else null, Int8.Type),
+        #"Added file_name" = Table.AddColumn(#"Added Counter", "file_name", each if [add] <> null then Record.Field([add], "path") else if [remove] <> null then Record.Field([remove], "path") else null, Text.Type),
+        #"Filtered Rows" = Table.SelectRows(#"Added file_name", each ([file_name] <> null)),
+        #"Added partitionValuesTable" = Table.AddColumn(#"Filtered Rows", "partitionValuesTable", each if [add] <> null then if Value.Is(Record.Field([add], "partitionValues"), Record.Type) then Record.ToTable(Record.Field([add], "partitionValues")) else Table.RenameColumns(Record.Field([add], "partitionValues"), {"Key", "Name"}) else null, type nullable table),
+        #"Added Custom3" = Table.AddColumn(#"Added partitionValuesTable", "partitionValuesJSON", each Text.FromBinary(Json.FromValue([partitionValuesTable]))),
+        #"Grouped Rows1" = Table.Group(#"Added Custom3", {"file_name"}, {{"partitionValuesJSON", each List.Max([partitionValuesJSON]), type nullable text}, {"isRelevant", each List.Sum([Counter]), type nullable text}}),
+        #"Relevant Files" = Table.SelectRows(#"Grouped Rows1", each ([isRelevant] > 0)),
+        #"Added Custom2" = Table.AddColumn(#"Relevant Files", "partitionValuesTable", each try Table.FromRecords(Json.Document([partitionValuesJSON])) otherwise null, type nullable table),
+        #"Added Custom4" = Table.AddColumn(#"Added Custom2", "partitionValues", each try Table.Pivot([partitionValuesTable], Table.SelectRows(#"metadata_columns", each [isPartitionedBy] = true)[name], "Name", "Value") otherwise null, type nullable table),
+        #"Expanded partitionValues" = Table.ExpandTableColumn(#"Added Custom4", "partitionValues", Table.SelectRows(#"metadata_columns", each [isPartitionedBy] = true)[name]),
+        #"Added Full_Path" = Table.AddColumn(#"Expanded partitionValues", "Full_Path", each Text.Replace(DeltaTablePath & Text.Replace([file_name], "=", "%3D"), "/", Delimiter), Text.Type),
+        #"Removed Columns3" = Table.RemoveColumns(#"Added Full_Path",{"file_name", "partitionValuesJSON", "isRelevant", "partitionValuesTable"}),
+        #"Buffered RelevantFiles" = Table.Buffer(#"Removed Columns3"),
+        #"Merged Queries" = Table.NestedJoin(#"Buffered RelevantFiles", {"Full_Path"}, DeltaTableFolderContent_wFullPath, {"Full_Path"}, "DeltaTable Folder", JoinKind.Inner),
+        #"Removed Columns" = Table.RemoveColumns(#"Merged Queries",{"Full_Path"}),
+        #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Columns", "DeltaTable Folder", {"Content"}, {"Content"}),
         #"Added Custom1" = Table.AddColumn(#"Expanded DeltaTable Folder", "Data", each Parquet.Document([Content]), Table.Type),
-        #"Removed Columns1" = Table.RemoveColumns(#"Added Custom1",{"Content", "Folder Path"}),
+        #"Removed Columns1" = Table.RemoveColumns(#"Added Custom1",{"Content"}),
         #"Expanded Data" = Table.ExpandTableColumn(#"Removed Columns1", "Data", Table.SelectRows(metadata_columns, each not [isPartitionedBy])[name]),
         #"Changed Type" = Table.TransformColumnTypes(#"Expanded Data",metadata_columns[ChangeDataType])
     in
