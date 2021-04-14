@@ -5,7 +5,9 @@
 
 let
 
-    DeltaTableVersion = if DeltaTableOptions = null or not Record.HasFields(DeltaTableOptions, "Version") then null else Record.Field(DeltaTableOptions, "Version"),
+    DeltaTableVersion = if DeltaTableOptions = null then null else Record.FieldOrDefault(DeltaTableOptions, "Version", null),
+    PartitionFilterFunction = if DeltaTableOptions = null then (x) => true else Record.FieldOrDefault(DeltaTableOptions, "PartitionFilterFunction", (x) => true),
+
     DeltaTableFolderContent_wFullPath = 
     let 
         #"Added Full_Path" = Table.AddColumn(DeltaTableFolderContent, "Full_Path", each Text.Replace([Folder Path] & [Name], "=", "%3D")),
@@ -18,6 +20,14 @@ let
         Delimiter = if Text.Contains(DeltaTableFolderContent_wFullPath{0}[Full_Path], "//") then "/" else "\"
     in
         Delimiter,
+
+    #"TableSchema" = 
+    let
+        ExpressionText = "type table [" & Text.Combine(metadata_columns[TableDataType], ", ") & "]",
+        BufferedExpression = List.Buffer({ExpressionText}){0},
+        TableSchema = Expression.Evaluate(BufferedExpression, #shared)
+    in
+        TableSchema,
 
     #"_delta_log Folder" = 
     let
@@ -119,21 +129,25 @@ let
         #"Expanded schemaString" = Table.ExpandRecordColumn(JSON, "schemaString", {"fields"}, {"fields"}),
         #"Expanded fields" = Table.ExpandListColumn(#"Expanded schemaString", "fields"),
         #"Expanded fields1" = Table.ExpandRecordColumn(#"Expanded fields", "fields", {"name", "type", "nullable", "metadata"}, {"name", "type", "nullable", "metadata"}),
-        #"Added Custom" = Table.AddColumn(#"Expanded fields1", "isPartitionedBy", each List.Contains([partitionColumns], [name]), Logical.Type),
-        #"Buffered Fields" = Table.Buffer(#"Added Custom"),
-        #"Added Custom1" = Table.AddColumn(#"Buffered Fields", "PBI_DataType", each if [type] = "long" then Int64.Type
-    else if [type] = "integer" then Int32.Type
-    else if [type] = "short" then Int16.Type
-    else if [type] = "byte" then Int8.Type
-    else if [type] = "float" then Single.Type
-    else if [type] = "double" then Double.Type
-    else if [type] = "string" then Text.Type
-    else if [type] = "timestamp" then DateTime.Type
-    else if [type] = "boolean" then Logical.Type
-    else Text.Type),
-        #"Added Custom2" = Table.AddColumn(#"Added Custom1", "ChangeDataType", each {[name], [PBI_DataType]})
+        #"Added Custom" = Table.Buffer(Table.AddColumn(#"Expanded fields1", "isPartitionedBy", each List.Contains([partitionColumns], [name]), Logical.Type)),
+        #"Added Custom1" = Table.AddColumn(#"Added Custom", "PBI_DataType", 
+    each if [type] = "long" then [PBI_DataType=Int64.Type, PBI_Text="Int64.Type", PBI_Transformation=Int64.From]
+    else if [type] = "integer" then [PBI_DataType=Int32.Type, PBI_Text="Int32.Type", PBI_Transformation=Int32.From]
+    else if [type] = "short" then [PBI_DataType=Int16.Type, PBI_Text="Int16.Type", PBI_Transformation=Int16.From]
+    else if [type] = "byte" then [PBI_DataType=Int8.Type, PBI_Text="Int8.Type", PBI_Transformation=Int8.From]
+    else if [type] = "float" then [PBI_DataType=Single.Type, PBI_Text="Single.Type", PBI_Transformation=Single.From]
+    else if [type] = "double" then [PBI_DataType=Double.Type, PBI_Text="Double.Type", PBI_Transformation=Double.From]
+    else if [type] = "string" then [PBI_DataType=Text.Type, PBI_Text="Text.Type", PBI_Transformation=Text.From]
+    else if [type] = "timestamp" then [PBI_DataType=DateTime.Type, PBI_Text="DateTime.Type", PBI_Transformation=DateTime.From]
+    else if [type] = "boolean" then [PBI_DataType=Logical.Type, PBI_Text="Logical.Type", PBI_Transformation=Logical.From]
+    else [PBI_DataType=Text.Type, PBI_Text="Text.Type", PBI_Transformation=Text.From]),
+        #"Expanded PBI_DataType" = Table.ExpandRecordColumn(#"Added Custom1", "PBI_DataType", {"PBI_DataType", "PBI_Text", "PBI_Transformation"}, {"PBI_DataType", "PBI_Text", "PBI_Transformation"}),
+        #"Added Custom2" = Table.AddColumn(#"Expanded PBI_DataType", "ChangeDataType", each {[name], [PBI_DataType]}, type list),
+        #"Added Custom3" = Table.AddColumn(#"Added Custom2", "TableDataType", each [name] & "=" & (if [nullable] then "nullable " else "") & Text.From([PBI_Text]), type text),
+        #"Added Custom4" = Table.AddColumn(#"Added Custom3", "ColumnTransformation", each {[name], [PBI_Transformation]}, type list),
+        #"Buffered Fields" = Table.Buffer(#"Added Custom4")
     in
-        #"Added Custom2",
+        #"Buffered Fields",
 
     #"Data" = 
     let
@@ -142,23 +156,23 @@ let
         #"Added file_name" = Table.AddColumn(#"Added Counter", "file_name", each if [add] <> null then Record.Field([add], "path") else if [remove] <> null then Record.Field([remove], "path") else null, Text.Type),
         #"Filtered Rows" = Table.SelectRows(#"Added file_name", each ([file_name] <> null)),
         #"Added partitionValuesTable" = Table.AddColumn(#"Filtered Rows", "partitionValuesTable", each if [add] <> null then if Value.Is(Record.Field([add], "partitionValues"), Record.Type) then Record.ToTable(Record.Field([add], "partitionValues")) else Table.RenameColumns(Record.Field([add], "partitionValues"), {"Key", "Name"}) else null, type nullable table),
-        #"Added Custom3" = Table.AddColumn(#"Added partitionValuesTable", "partitionValuesJSON", each Text.FromBinary(Json.FromValue([partitionValuesTable]))),
-        #"Grouped Rows1" = Table.Group(#"Added Custom3", {"file_name"}, {{"partitionValuesJSON", each List.Max([partitionValuesJSON]), type nullable text}, {"isRelevant", each List.Sum([Counter]), type nullable text}}),
+        #"Added partitionValuesJSON" = Table.AddColumn(#"Added partitionValuesTable", "partitionValuesJSON", each Text.FromBinary(Json.FromValue([partitionValuesTable]))),
+        #"Grouped Rows1" = Table.Group(#"Added partitionValuesJSON", {"file_name"}, {{"partitionValuesJSON", each List.Max([partitionValuesJSON]), type nullable text}, {"isRelevant", each List.Sum([Counter]), type nullable text}}),
         #"Relevant Files" = Table.SelectRows(#"Grouped Rows1", each ([isRelevant] > 0)),
-        #"Added Custom2" = Table.AddColumn(#"Relevant Files", "partitionValuesTable", each try Table.FromRecords(Json.Document([partitionValuesJSON])) otherwise null, type nullable table),
-        #"Added Custom4" = Table.AddColumn(#"Added Custom2", "partitionValues", each try Table.Pivot([partitionValuesTable], Table.SelectRows(#"metadata_columns", each [isPartitionedBy] = true)[name], "Name", "Value") otherwise null, type nullable table),
-        #"Expanded partitionValues" = Table.ExpandTableColumn(#"Added Custom4", "partitionValues", Table.SelectRows(#"metadata_columns", each [isPartitionedBy] = true)[name]),
-        #"Added Full_Path" = Table.AddColumn(#"Expanded partitionValues", "Full_Path", each Text.Replace(DeltaTablePath & Text.Replace([file_name], "=", "%3D"), "/", Delimiter), Text.Type),
+        #"Added partitionValuesTable2" = Table.AddColumn(#"Relevant Files", "partitionValuesTable", each try Table.FromRecords(Json.Document([partitionValuesJSON])) otherwise null),
+        #"Added partitionValuesRecord" = Table.AddColumn(#"Added partitionValuesTable2", "partitionValuesRecord", each Record.TransformFields(Record.FromTable([partitionValuesTable]), Table.SelectRows(#"metadata_columns", each [isPartitionedBy] = true)[ColumnTransformation]), Expression.Evaluate("type [" & Text.Combine(Table.SelectRows(#"metadata_columns", each [isPartitionedBy] = true)[TableDataType], ", ") & "]", #shared)),
+        #"Filtered Rows1" = Table.SelectRows(#"Added partitionValuesRecord", each PartitionFilterFunction([partitionValuesRecord])),
+        #"Expanded partitionValuesRecord" = Table.ExpandRecordColumn(#"Filtered Rows1", "partitionValuesRecord", {"ProductSubcategoryKey", "Color"}, {"ProductSubcategoryKey", "Color"}),
+        #"Added Full_Path" = Table.AddColumn(#"Expanded partitionValuesRecord", "Full_Path", each Text.Replace(DeltaTablePath & Text.Replace([file_name], "=", "%3D"), "/", Delimiter), Text.Type),
         #"Removed Columns3" = Table.RemoveColumns(#"Added Full_Path",{"file_name", "partitionValuesJSON", "isRelevant", "partitionValuesTable"}),
         #"Buffered RelevantFiles" = Table.Buffer(#"Removed Columns3"),
         #"Merged Queries" = Table.NestedJoin(#"Buffered RelevantFiles", {"Full_Path"}, DeltaTableFolderContent_wFullPath, {"Full_Path"}, "DeltaTable Folder", JoinKind.Inner),
         #"Removed Columns" = Table.RemoveColumns(#"Merged Queries",{"Full_Path"}),
         #"Expanded DeltaTable Folder" = Table.ExpandTableColumn(#"Removed Columns", "DeltaTable Folder", {"Content"}, {"Content"}),
-        #"Added Custom1" = Table.AddColumn(#"Expanded DeltaTable Folder", "Data", each Parquet.Document([Content]), Table.Type),
+        #"Added Custom1" = Table.AddColumn(#"Expanded DeltaTable Folder", "Data", each Parquet.Document([Content]), Expression.Evaluate("type table [" & Text.Combine(metadata_columns[TableDataType], ", ") & "]", #shared)),
         #"Removed Columns1" = Table.RemoveColumns(#"Added Custom1",{"Content"}),
-        #"Expanded Data" = Table.ExpandTableColumn(#"Removed Columns1", "Data", Table.SelectRows(metadata_columns, each not [isPartitionedBy])[name]),
-        #"Changed Type" = Table.TransformColumnTypes(#"Expanded Data",metadata_columns[ChangeDataType])
+        #"Expanded Data" = Table.ExpandTableColumn(#"Removed Columns1", "Data", Table.SelectRows(metadata_columns, each not [isPartitionedBy])[name])
     in
-        #"Changed Type"
+        #"Expanded Data"
 
 in #"Data"
