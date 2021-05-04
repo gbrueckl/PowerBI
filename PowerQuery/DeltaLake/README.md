@@ -1,66 +1,103 @@
 # Reading Delta Lake tables natively in PowerBI
-The provided PowerQuery/M function allows you to read a Delta Lake table directly from any storage supported by PowerBI. Most common storages would be Azure Data Lake Store, Azure Blob Storage or a local folder or file share.
+The provided PowerQuery/M function allows you to read a Delta Lake table directly from any storage supported by PowerBI. Common storages which have also been tested include Azure Data Lake Store, Azure Blob Storage or a local folder or file share.
 
 # Features
 - Read Delta Lake table into PowerBI without having a cluster (Spark, Databricks, Azure Synapse) up and running
 - Support all storage systems that are supported by PowerBI
-    - Azure Data Lake Store
-    - Azure Blob Storage
-    - Local Folder or Network Share
+    - Azure Data Lake Store (tested)
+    - Azure Blob Storage (tested)
+    - Local Folder or Network Share (tested)
+    - AWS S3 (not yet tested)
+- Support for Partition Elimination to leverage the partitioning scheme of the Delta Lake table
 - Support for Delta Lake time travel - e.g. `VERSION AS OF`
 
 # Usage
 1. In PowerBI desktop, go to Home -> Queries -> Transform Data
 2. Once you are in the Power Query Editor use Home -> New Source -> Blank query
 3. Go to Home -> Query -> Advanced Editor
-4. Paste the code of the custom function: [fn_ReadDeltaTable.pq](https://raw.githubusercontent.com/gbrueckl/PowerBI/main/PowerQuery/DeltaLake/fn_ReadDeltaTable.pq)
-5. Connect to your storage - e.g. create a PQ query with the following code and call it `ADLS_Content`
+4. Paste the code of the custom function: [fn_ReadDeltaTable.pq](https://raw.githubusercontent.com/gbrueckl/PowerBI/main/PowerQuery/DeltaLake/fn_ReadDeltaTable.pq) and name the query `fn_ReadDeltaTable`
+5. Connect to your storage - e.g. create a PQ query with the following code and call it `Blob_Content`
 ```
 let
-    Source = AzureStorage.DataLake(
-        "https://myadls.dfs.core.windows.net/data/MyDeltaTable.delta",
-        [HierarchicalNavigation = false]
+    Source = AzureStorage.Blobs("https://gbadls01.blob.core.windows.net/public"),
+    #"Filtered Rows" = Table.SelectRows(Source, each Text.StartsWith([Name], "powerbi_delta/FactInternetSales_part.delta/")),
 in
-    Source
+    #"Filtered Rows"
 ```
-6. Open your function and select `ADLS_Cotent` in the parameter `DeltaTableFolderContent`
-7. A new PQ query will be created for you showing the contents of the Delta Lake Table
+6. Open your query that contains the function and select `Blob_Content` in the parameter `DeltaTableFolderContent`
+7. Click `Invoke`
+7. A new PQ query will be created for you showing the contents of the Delta Lake table
+
+# Parameters
+The function supports two parameters of which the second is optional:
+1. DeltaTableFolderContent
+2. DeltaTableOptions
 
 
+## Parameter DeltaTableFolderContent
+A table that contains a file/folder listing of your Delta Lake table. Power BI supports a wide set of storage services which you can use for this. There are however some mandatory things this file/folder listing has to cotain:
+- a sub-folder `_delta_log` (which holds the Delta Log files and also ensures that the parent folder is the root of the Delta Lake table)
+- mandatory columns `Name`, `Folder Path`, `Content`, `Extension`
+- a column called `file_name`
+These are all returned by default for common Storage connectors like Azure Data Lake Storage Gen2 or Azure Blob Storaage
+
+## Parameter DeltaTableOptions
+An optional record that be specified to control the following options:
+- `Version` - a numeric value that defines historic specific version of the Delta Lake table you want to read. This is similar to specifying `VERSION AS OF` when querying the Delta Lake table via SQL. Default is the most recent/current version.
+- `PartitionFilterFunction` - a fuction that is used to filter out partitions before actually reading the files. The function has to take 1 parameter of type `record` and must return a `logical` type (true/false). The record that is passed in can then be used to specify the partition filter. For each file in the delta table the metadata is checked against this function. If it is not matched, it is discarded from the final list of files that make up the Delta Lake table.
+Assuming your Delta Lake table is partitioned by Year and Month and you want to filter for `Year=2021` and `Month="Jan"` your function may look like this:
+```
+(PartitionValues as record) as logical =>
+    Record.Field(PartitionValues, "Year") = 2021 and Record.Field(PartitionValues, "Month") = "Jan"
+```
+
+It supports all possible variations that are supported by Power Query/M so you can also build complex partition filters.
+- additional options may be added in the future!
 
 # Known limitations
-- Reading from Blob Store
-    - currently needs some tweaking as file listing returned by  the blob connector is slightly different to e.g. the Azure Data Lake Store connector
-- Support for partitioned tables
-   - currently columns used for partitioning will always have the value NULL
-   - values for partitioning columns are not stored as part of the parquet file but need to be derived from the folder path
-- Performance
-   - is currently not great but this is mainly related to the Parquet connector as it seems
 - Time Travel
-   - currently only supports “VERSION AS OF”
-   - need to add “TIMESTAMP AS OF”
-- Predicate Pushdown / Partition Elimination
-   - currently not supported – it always reads the whole table and filters afterwards
+   - currently only supports `VERSION AS OF`
+   - `TIMESTAMP AS OF` not yet supported
+
+# Examples
+The examples below can be used *as-is* in Power BI desktop. If you are prompted for authentication, just select `Anonymous` for your authentication method.
+> Note: In the examples the root folder of the Delta Lake table ends with `.delta`. This is not mandatory and can be any path.
+
+## Using Delta Lake Time Travel
+To use Delta Lake Time Travel you need to specify the `Version`-option as part of the second argument. The following example reads the Version 123 of a Delta Lake table from an Azure Blob Storage. 
+```
+let
+    Source = AzureStorage.Blobs("https://gbadls01.blob.core.windows.net/public"),
+    #"Filtered Rows" = Table.SelectRows(Source, each Text.StartsWith([Name], "powerbi_delta/FactInternetSales_part.delta/")),
+    DeltaTable = fn_ReadDeltaTable(#"Filtered Rows", [Version=1])
+in
+    DeltaTable
+```
+
+## Using Delta Lake Partition Elimination
+Partition Elimination is a crucial feature when working with large amounts of data. Without it, you would need to read the whole table and discard a majority of
+```
+let
+    Source = AzureStorage.Blobs("https://gbadls01.blob.core.windows.net/public"),
+    #"Filtered Rows" = Table.SelectRows(Source, each Text.StartsWith([Name], "powerbi_delta/FactInternetSales_part.delta/")),
+    DeltaTable = fn_ReadDeltaTable(#"Filtered Rows", [PartitionFilterFunction = (x) => Record.Field(x, "SalesTerritoryKey") >= 5])
+in
+    DeltaTable
+```
+
 
 
 # FAQ
-**Q:** Which path do I need to specify?
+**Q:** The Power Query UI does not show the second parameter. How can I use it?
 
-**A:** You need to specify the path to the folder where the Delta Lake table is stored. It must contain a sub-folder `_delta_log`.
+**A:** To use the second parameter of the function you need to use the advanced editor.
 
 --------------------
-**Q:** How can I read my Delta Lake table stored on Azure Blob Storage?
+**Q:** How can I use [Delta Lake Time Travel](https://databricks.com/blog/2019/02/04/introducing-delta-time-travel-for-large-scale-data-lakes.html)?
 
-**A:** Here is some sample code which returns the expected folder structure form a Blob Storage:
-```
-let
-    Source = AzureStorage.Blobs("https://myaccount.blob.core.windows.net/mycontainer"),
-    #"Filtered Rows" = Table.SelectRows(Source, each Text.StartsWith([Name], "myFolder/myDeltaTable")),
-    #"Added FullPath" = Table.AddColumn(#"Filtered Rows", "FullPath", each [Folder Path] & "/" & [Name], Text.Type),
-    #"Removed Columns" = Table.RemoveColumns(#"Added FullPath",{"Name", "Folder Path"}),
-    #"Split Column by Delimiter" = Table.SplitColumn(#"Removed Columns", "FullPath", Splitter.SplitTextByEachDelimiter({"/"}, QuoteStyle.Csv, true), {"Folder Path", "Name"}),
-    #"Append Delimiter" = Table.TransformColumns(#"Split Column by Delimiter",{{"Folder Path", (_) => _ & "/", type text}})
-in
-    #"Append Delimiter"
-```
-The output can then be fed into the function.
+**A:** The function supports an optional second parameter to supply generic parameters. To query specific version of the Delta Lake table, you can provide a record with the field `Version`:
+
+--------------------
+**Q:** How can I use Partition Elimination?
+
+**A:** The function supports an optional second parameter to supply generic parameters. To query specific version of the Delta Lake table, you can provide a record with the field `Version`:
