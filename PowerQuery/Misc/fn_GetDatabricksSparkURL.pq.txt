@@ -1,0 +1,20 @@
+let
+    fn_GetDatabricksSparkURL = (jdbcUrl as text) =>
+
+let
+    Source = DatabricksJDBCURL,
+    https = Text.Split("url=" & Source, ";"),
+    #"Converted to Table" = Table.FromList(https, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+    #"Split Column by Delimiter" = Table.SplitColumn(#"Converted to Table", "Column1", Splitter.SplitTextByDelimiter("=", QuoteStyle.Csv), {"key", "value"}),
+    #"Filtered Rows" = Table.SelectRows(#"Split Column by Delimiter", each ([key] = "httpPath" or [key] = "url")),
+    #"Replaced Value" = Table.ReplaceValue(#"Filtered Rows","jdbc:hive2","https",Replacer.ReplaceText,{"value"}),
+    #"Replaced Value1" = Table.ReplaceValue(#"Replaced Value","443/default","443/",Replacer.ReplaceText,{"value"}),
+    #"Pivot Rows" = #"Replaced Value1",
+    #"Pivoted Column" = Table.Pivot(#"Pivot Rows", List.Distinct(#"Pivot Rows"[key]), "key", "value"),
+    #"Added finalUrl" = Table.AddColumn(#"Pivoted Column", "finalUrl", each [url] & [httpPath]),
+    result = #"Added finalUrl"{0}[finalUrl]
+in
+    result
+
+in
+    fn_GetDatabricksSparkURL

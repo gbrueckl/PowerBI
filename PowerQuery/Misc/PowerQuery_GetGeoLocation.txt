@@ -1,0 +1,16 @@
+let
+    GeoCode = (address as text) =>
+
+let
+    Source = Json.Document(Web.Contents("http://www.datasciencetoolkit.org/maps/api/geocode/json?sensor=false&address=" & address)),
+    results = Source[results],
+    results1 = results{0},
+    geometry = results1[geometry],
+    location = geometry[location],
+    tbl = Table.FromRecords({[Lng = location[lng], Lat = location[lat]]}),
+    ret = if address is null then null else Table.TransformColumnTypes(tbl,{{"Lng", type number}, {"Lat", type number}})
+in
+    ret
+
+in 
+    GeoCode
