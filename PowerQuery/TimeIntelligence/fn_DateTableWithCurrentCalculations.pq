@@ -1,54 +1,118 @@
 let
     fn_DateTableWithCurrentCalculations = (
-        BaseDateTable as table, 
-        CurrentTransformations as table,
-        optional DateColumnName as nullable text) => 
+        ExistingDateTable as table, 
+        CurrentDefinitions as table,
+        DateColumnName as text) => 
     let
-        // Parameters
-        DateColumnNameValue = if DateColumnName = null then "Date" else DateColumnName,
-        BaseDateTableBuffered = Table.Buffer(BaseDateTable),
+
+        ExistingDateTableBuffered = Table.Buffer(ExistingDateTable),
 
         BaseDateTableWithType = 
         let
-            Source = BaseDateTableBuffered,
-            CalculatedDates = List.Buffer(CurrentTransformationsWithType[Date]),
-            #"Added Custom" = Table.AddColumn(Source, "Type", each if List.Contains(CalculatedDates, Record.Field(_, DateColumnNameValue)) then "date values" else "regular", type text)
+            Source = ExistingDateTableBuffered,
+            CalculatedDates = List.Buffer(CurrentDefinitionsEvaluated[Date]),
+            #"Added Custom" = Table.AddColumn(Source, "Type", each if List.Contains(CalculatedDates, Record.Field(_, DateColumnName)) then "date values" else "regular dates", type text)
         in
             #"Added Custom",
 
-        CurrentTransformationsWithFunctions = 
+        CurrentDefinitionsWithFunctions =
         let
-            Source = CurrentTransformations,
-            #"Added Transformation" = Table.AddColumn(Source, "Transformation", each (x as text) as text => [NewValue], type function),
+            Source = CurrentDefinitions,
+            #"Replace DateColumn References" = Table.TransformColumns(Source,{{"Filter", (x) => Text.Replace(x, "<<DateColumn>>", "[" & DateColumnName & "]"), type text}}),
+            #"Added Transformation" = Table.AddColumn(#"Replace DateColumn References", "Transformation", each (x as text) as text => [NewValue], type function),
             #"Added TableTransformation" = Table.AddColumn(#"Added Transformation", "TableTransformation", each {[Column],[Transformation], type text}, type list),
-            #"Added Custom" = Table.AddColumn(#"Added TableTransformation", "Transformation_Agg", each (x as table) as text => List.SingleOrDefault(List.Intersect({Table.Column(x, [Column]), CurrentTransformations_Input[NewValue]}), List.First(Table.Column(x, [Column])))),
-            #"Added Custom1" = Table.AddColumn(#"Added Custom", "TableTransformation_Agg", each {[Column], [Transformation_Agg], type text}, type list),
-            #"Grouped Rows" = Table.Group(#"Added Custom1", {"Filter"}, {{"Transformations", each List.Combine({[TableTransformation]}), type list}, {"Transformations_Agg", each List.Combine({[TableTransformation_Agg]}), type list}})
+            #"Added Transformation_Agg" = Table.AddColumn(#"Added TableTransformation", "Transformation_Agg", each (x as table) as text => List.SingleOrDefault(List.Intersect({Table.Column(x, [Column]), CurrentDefinitions_Input[NewValue]}), List.First(Table.Column(x, [Column])))),
+            #"Added TableTransformation_Agg" = Table.AddColumn(#"Added Transformation_Agg", "TableTransformation_Agg", each {[Column], [Transformation_Agg], type text}, type list),
+            #"Grouped Rows" = Table.Group(#"Added TableTransformation_Agg", {"Filter"}, {{"Transformations", each List.Combine({[TableTransformation]}), type list}, {"Transformations_Agg", each List.Combine({[TableTransformation_Agg]}), type list}})
         in
             #"Grouped Rows",
 
-        CurrentTransformationsWithType = 
+        CurrentDefinitionsEvaluated = 
         let
-            Source = CurrentTransformationsWithFunctions,
-            #"Added BaseRows" = Table.AddColumn(Source, "BaseRows", each Table.SelectRows(BaseDateTable, Expression.Evaluate("each " & [Filter])), type table),
+            Source = CurrentDefinitionsWithFunctions,
+            #"Added BaseRows" = Table.AddColumn(Source, "BaseRows", each Table.SelectRows(ExistingDateTable, Expression.Evaluate("each " & [Filter], Environment_DateFunctions)), type table),
             #"Added NewDateRows" = Table.AddColumn(#"Added BaseRows", "NewDateRows", each Table.TransformColumns([BaseRows], [Transformations]), type table),
-            #"Expanded NewDateRows" = Table.Combine(#"Added NewDateRows"[NewDateRows]),
-            #"Added Type column" = Table.AddColumn(#"Expanded NewDateRows", "Type", each "calculated", type text)
+            #"Expanded NewDateRows" = Table.Combine(#"Added NewDateRows"[NewDateRows])
         in
-            #"Added Type column",
+            #"Expanded NewDateRows",
 
-
-        OverlapsWithType =
+        Environment_DateFunctions = 
         let
-            Source = CurrentTransformationsWithType,
-            #"Filtered Rows" = Table.SelectRows(Source, Expression.Evaluate("each " & Text.Combine(CurrentTransformationsWithFunctions[Filter], " or "))),
-            Transformations_Current = List.Distinct(List.Combine(CurrentTransformationsWithFunctions[Transformations_Agg]), (x) => x{0}),
-            Transformations_Other = List.Transform(List.RemoveMatchingItems(Table.ColumnNames(BaseDateTableWithType), List.Combine({CurrentTransformations[Column], {DateColumnNameValue}})), (y) => {y, (x as table) =>  List.First(Table.Column(x, y)), type any}),
-            #"Grouped Rows" = Table.Group(#"Filtered Rows", {"Date"}, List.Combine({Transformations_Current, Transformations_Other})),
-            #"Change Tyble Type" = Value.ReplaceType(Table.SelectColumns(#"Grouped Rows",Table.ColumnNames(BaseDateTable)), Value.Type(BaseDateTable)),
-            #"Added Custom" = Table.AddColumn(#"Change Tyble Type", "Type", each "current texts", type text)
+            Source = [
+                Date.IsInPreviousDay = Date.IsInPreviousDay,
+                Date.IsInPreviousNDays = Date.IsInPreviousNDays,
+                Date.IsInCurrentDay = Date.IsInCurrentDay,
+                Date.IsInNextDay = Date.IsInNextDay,
+                Date.IsInNextNDays = Date.IsInNextNDays,
+                Date.IsInPreviousWeek = Date.IsInPreviousWeek,
+                Date.IsInPreviousNWeeks = Date.IsInPreviousNWeeks,
+                Date.IsInCurrentWeek = Date.IsInCurrentWeek,
+                Date.IsInNextWeek = Date.IsInNextWeek,
+                Date.IsInNextNWeeks = Date.IsInNextNWeeks,
+                Date.IsInPreviousMonth = Date.IsInPreviousMonth,
+                Date.IsInPreviousNMonths = Date.IsInPreviousNMonths,
+                Date.IsInCurrentMonth = Date.IsInCurrentMonth,
+                Date.IsInNextMonth = Date.IsInNextMonth,
+                Date.IsInNextNMonths = Date.IsInNextNMonths,
+                Date.IsInPreviousQuarter = Date.IsInPreviousQuarter,
+                Date.IsInPreviousNQuarters = Date.IsInPreviousNQuarters,
+                Date.IsInCurrentQuarter = Date.IsInCurrentQuarter,
+                Date.IsInNextQuarter = Date.IsInNextQuarter,
+                Date.IsInNextNQuarters = Date.IsInNextNQuarters,
+                Date.IsInPreviousYear = Date.IsInPreviousYear,
+                Date.IsInPreviousNYears = Date.IsInPreviousNYears,
+                Date.IsInCurrentYear = Date.IsInCurrentYear,
+                Date.IsInNextYear = Date.IsInNextYear,
+                Date.IsInNextNYears = Date.IsInNextNYears,
+                Date.IsInYearToDate = Date.IsInYearToDate,
+                Date.MonthName = Date.MonthName,
+                Date.DayOfWeekName = Date.DayOfWeekName,
+                Date.FromText = Date.FromText,
+                Date.From = Date.From,
+                Date.ToText = Date.ToText,
+                Date.ToRecord = Date.ToRecord,
+                Date.Year = Date.Year,
+                Date.Month = Date.Month,
+                Date.Day = Date.Day,
+                Date.AddDays = Date.AddDays,
+                Date.AddWeeks = Date.AddWeeks,
+                Date.AddMonths = Date.AddMonths,
+                Date.AddQuarters = Date.AddQuarters,
+                Date.AddYears = Date.AddYears,
+                Date.IsLeapYear = Date.IsLeapYear,
+                Date.StartOfYear = Date.StartOfYear,
+                Date.StartOfQuarter = Date.StartOfQuarter,
+                Date.StartOfMonth = Date.StartOfMonth,
+                Date.StartOfWeek = Date.StartOfWeek,
+                Date.StartOfDay = Date.StartOfDay,
+                Date.EndOfYear = Date.EndOfYear,
+                Date.EndOfQuarter = Date.EndOfQuarter,
+                Date.EndOfMonth = Date.EndOfMonth,
+                Date.EndOfWeek = Date.EndOfWeek,
+                Date.EndOfDay = Date.EndOfDay,
+                Date.DayOfWeek = Date.DayOfWeek,
+                Date.DayOfYear = Date.DayOfYear,
+                Date.DaysInMonth = Date.DaysInMonth,
+                Date.QuarterOfYear = Date.QuarterOfYear,
+                Date.WeekOfMonth = Date.WeekOfMonth,
+                Date.WeekOfYear = Date.WeekOfYear,
+                Date.Type = Date.Type
+            ]
+        in
+            Source,
+
+        OverlapsWithType = 
+        let
+            Source = CurrentDefinitionsEvaluated,
+            #"Filtered Rows" = Table.SelectRows(Source, Expression.Evaluate("each " & Text.Combine(CurrentDefinitionsWithFunctions[Filter], " or "), Environment_DateFunctions)),
+            Transformations_Current = List.Distinct(List.Combine(CurrentDefinitionsWithFunctions[Transformations_Agg]), (x) => x{0}),
+            Transformations_Other = List.Transform(List.RemoveMatchingItems(Table.ColumnNames(BaseDateTableWithType), List.Combine({CurrentDefinitions[Column], {DateColumnName}})), (y) => {y, (x as table) =>  List.First(Table.Column(x, y)), type any}),
+            #"Grouped Rows" = Table.Group(#"Filtered Rows", {DateColumnName}, List.Combine({Transformations_Current, Transformations_Other})),
+            #"Change Table Type" = Value.ReplaceType(Table.SelectColumns(#"Grouped Rows",Table.ColumnNames(ExistingDateTable)), Value.Type(ExistingDateTable)),
+            #"Added Custom" = Table.AddColumn(#"Change Table Type", "Type", each "current values", type text)
         in
             #"Added Custom",
+
 
         result = Table.Combine({BaseDateTableWithType, OverlapsWithType})
     in
